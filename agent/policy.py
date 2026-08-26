@@ -37,4 +37,24 @@ class PolicyContext:
 
 
 def check(context: PolicyContext) -> tuple[bool, str]:
-    raise NotImplementedError("BƯỚC 3b: implement policy check")
+    """Evaluate a tool call using deny-by-default validation.
+
+    The mandatory restricted-plus-egress rule is deliberately expressed at
+    the PEP rather than delegated to the model or individual tools.
+    """
+    classifications = {"public", "internal", "restricted"}
+    if context.data_classification not in classifications:
+        return False, f"deny: unknown data classification {context.data_classification!r}"
+    if not context.request_purpose.strip():
+        return False, "deny: request purpose is required"
+    if not context.agent_owner.strip():
+        return False, "deny: agent owner identity is required"
+    if context.delegation_depth < 0:
+        return False, "deny: delegation depth cannot be negative"
+    if context.data_classification == "restricted" and context.egress_enabled:
+        return False, "deny: restricted data cannot be used in an egress-enabled run"
+
+    return True, (
+        f"allow: {context.data_classification} data for purpose "
+        f"{context.request_purpose!r}; egress_enabled={context.egress_enabled}"
+    )
