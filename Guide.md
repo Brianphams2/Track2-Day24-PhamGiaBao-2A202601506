@@ -95,6 +95,16 @@ tối thiểu: `classification == "restricted" and egress_enabled` → deny.
 pytest tests/test_policy.py -v
 ```
 
+---
+
+<p align="center">
+  <img src="data/easter-egg.png" alt="Trùm công nghệ — Cho tôi Claude Code, tôi sẽ nâng cả trái đất lên" width="380">
+</p>
+
+> 🥚 **Easter egg** — nghỉ 30 giây, rồi vào 3c: phần khó nhất của lab.
+
+---
+
 ### 3c. `agent/runner.py` — trifecta split + egress allowlist (13')
 
 **Phần khó nhất.** Đọc kỹ docstring trong file — có sẵn gợi ý kiến trúc
