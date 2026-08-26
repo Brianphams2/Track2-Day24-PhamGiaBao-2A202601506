@@ -101,7 +101,8 @@ pytest tests/test_policy.py -v
   <img src="data/easter-egg.png" alt="Trùm công nghệ — Cho tôi Claude Code, tôi sẽ nâng cả trái đất lên" width="380">
 </p>
 
-> 🥚 **Easter egg** — nghỉ 30 giây, rồi vào 3c: phần khó nhất của lab.
+> 🥚 **Easter egg** — nghỉ giải lao tí nào. Tặng các bạn D403 Track 2 buổi
+> sáng 1 cái ảnh của thầy Hiếu.
 
 ---
 
