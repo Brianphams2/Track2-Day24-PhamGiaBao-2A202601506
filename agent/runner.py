@@ -53,11 +53,160 @@ Interface bắt buộc (agent/loop.py import và gọi hàm này nếu tồn t�
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import re
+import uuid
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+
+from agent import ledger, pii, policy, tools
 
 REPORTS_DIR = Path(__file__).resolve().parent.parent / "reports"
 DEFAULT_LEDGER_PATH = REPORTS_DIR / "ledger.jsonl"
+_TICKET_FILE_RE = re.compile(r"^ticket-(\d+)[a-z]*\.md$", re.IGNORECASE)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _args_hash(args: dict) -> str:
+    canonical = json.dumps(args, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _record_decision(
+    *,
+    ledger_path: Path,
+    context: policy.PolicyContext,
+    run_id: str,
+    tool: str,
+    args: dict,
+    identity_expires_at: str,
+) -> tuple[bool, str]:
+    allow, reason = policy.check(context)
+    ledger.append(
+        {
+            "ts": _utc_now().isoformat().replace("+00:00", "Z"),
+            "agent_id": context.agent_owner,
+            "agent_owner": context.agent_owner,
+            "identity_expires_at": identity_expires_at,
+            "run_id": run_id,
+            "tool": tool,
+            "args_hash": _args_hash(args),
+            "classification": context.data_classification,
+            "request_purpose": context.request_purpose,
+            "delegation_depth": context.delegation_depth,
+            "egress_enabled": context.egress_enabled,
+            "decision": "allow" if allow else "deny",
+            "reason": reason,
+        },
+        ledger_path,
+    )
+    return allow, reason
+
+
+def _ticket_ids(docs: list[dict]) -> list[int]:
+    ids: set[int] = set()
+    for doc in docs:
+        match = _TICKET_FILE_RE.fullmatch(str(doc.get("id", "")))
+        if match:
+            ids.add(int(match.group(1)))
+    return sorted(ids)
+
+
+def _trusted_customer_ids(ticket_ids: list[int]) -> list[str]:
+    """Map typed ticket IDs through the trusted relationship index only."""
+    wanted = set(ticket_ids)
+    customers = json.loads(tools.CUSTOMERS_FILE.read_text(encoding="utf-8"))
+    return sorted(
+        str(customer["customer_id"])
+        for customer in customers
+        if wanted.intersection(int(value) for value in customer.get("related_tickets", []))
+    )
 
 
 def handle(message: str, llm, log_dir: Path | None = None) -> str:
-    raise NotImplementedError("BƯỚC 3c: implement trifecta split")
+    ledger_path = (Path(log_dir) / "ledger.jsonl") if log_dir is not None else DEFAULT_LEDGER_PATH
+    request_id = uuid.uuid4().hex
+    identity_expires_at = (_utc_now() + timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+    # Run A owns untrusted document access. It has neither private-data tool
+    # access nor network egress, and emits only typed ticket IDs to Run B.
+    run_a_id = f"{request_id}:run-a"
+    run_a_context = policy.PolicyContext(
+        data_classification="internal",
+        request_purpose="summarize-tickets",
+        agent_owner="lab24-search-agent",
+        delegation_depth=0,
+        egress_enabled=False,
+    )
+    search_allowed, _ = _record_decision(
+        ledger_path=ledger_path,
+        context=run_a_context,
+        run_id=run_a_id,
+        tool="search_docs",
+        args={"query": message},
+        identity_expires_at=identity_expires_at,
+    )
+    docs = tools.search_docs(message) if search_allowed else []
+
+    # PII is redacted before document text enters either LLM operation. The
+    # typed boundary below passes file-derived integers, never document text.
+    safe_docs = [{"id": doc["id"], "text": pii.redact(doc["text"])} for doc in docs]
+    combined_text = "\n\n".join(doc["text"] for doc in safe_docs)
+    injected = llm.find_injection(combined_text)
+    typed_ticket_ids = _ticket_ids(docs)
+
+    # An injected network intent is evaluated as restricted egress and denied
+    # before any private record is read. No body or attacker-selected customer
+    # ID crosses from Run A into Run B.
+    if injected is not None:
+        egress_context = policy.PolicyContext(
+            data_classification="restricted",
+            request_purpose="injected-egress-request",
+            agent_owner="lab24-search-agent",
+            delegation_depth=0,
+            egress_enabled=True,
+        )
+        egress_allowed, _ = _record_decision(
+            ledger_path=ledger_path,
+            context=egress_context,
+            run_id=run_a_id,
+            tool="http_post",
+            args={"url": injected.target_url, "body_classification": "restricted"},
+            identity_expires_at=identity_expires_at,
+        )
+        if egress_allowed:
+            # The current policy always denies this branch. Keeping the body
+            # empty preserves the architectural boundary even under a future
+            # policy change: Run A never possesses customer records.
+            tools.http_post(injected.target_url, {"records": []})
+
+    # Run B accepts only typed ticket IDs and maps them through trusted
+    # related_tickets metadata. It can read restricted data but has no egress.
+    run_b_id = f"{request_id}:run-b"
+    for customer_id in _trusted_customer_ids(typed_ticket_ids):
+        run_b_context = policy.PolicyContext(
+            data_classification="restricted",
+            request_purpose="support-record-lookup",
+            agent_owner="lab24-customer-agent",
+            delegation_depth=1,
+            egress_enabled=False,
+        )
+        read_allowed, _ = _record_decision(
+            ledger_path=ledger_path,
+            context=run_b_context,
+            run_id=run_b_id,
+            tool="read_customer",
+            args={"customer_id": customer_id},
+            identity_expires_at=identity_expires_at,
+        )
+        if read_allowed:
+            customer = tools.read_customer(customer_id)
+            # Apply the PII gate before any future consumer can ingest the
+            # record; this lab deliberately does not pass it back to Run A.
+            pii.redact(json.dumps(customer, ensure_ascii=False))
+
+    return llm.summarize(safe_docs)
