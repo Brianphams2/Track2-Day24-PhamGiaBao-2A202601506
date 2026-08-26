@@ -33,12 +33,87 @@ rồi gọi verify() phải trả về False.
 """
 from __future__ import annotations
 
+import hashlib
+import json
+import threading
 from pathlib import Path
 
 
+_GENESIS_HASH = "0" * 64
+_REQUIRED_FIELDS = {
+    "ts",
+    "agent_id",
+    "run_id",
+    "tool",
+    "args_hash",
+    "classification",
+    "decision",
+    "reason",
+}
+_APPEND_LOCK = threading.Lock()
+
+
+def _canonical(entry: dict) -> str:
+    payload = {key: value for key, value in entry.items() if key != "hash"}
+    return json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _hash(entry: dict) -> str:
+    return hashlib.sha256(_canonical(entry).encode("utf-8")).hexdigest()
+
+
 def append(entry: dict, path: Path) -> dict:
-    raise NotImplementedError("BƯỚC 3d: implement ledger append")
+    missing = sorted(_REQUIRED_FIELDS - set(entry))
+    if missing:
+        raise ValueError(f"ledger entry missing required fields: {', '.join(missing)}")
+
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with _APPEND_LOCK:
+        previous_hash = _GENESIS_HASH
+        if path.exists():
+            lines = [line for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+            if lines:
+                try:
+                    previous_hash = str(json.loads(lines[-1])["hash"])
+                except (json.JSONDecodeError, KeyError, TypeError) as exc:
+                    raise ValueError("cannot append to a malformed ledger") from exc
+
+        complete = dict(entry)
+        complete.pop("hash", None)
+        complete["prev_hash"] = previous_hash
+        complete["hash"] = _hash(complete)
+        with path.open("a", encoding="utf-8", newline="\n") as handle:
+            handle.write(json.dumps(complete, ensure_ascii=False, sort_keys=True) + "\n")
+        return complete
 
 
 def verify(path: Path) -> bool:
-    raise NotImplementedError("BƯỚC 3d: implement ledger verify")
+    path = Path(path)
+    if not path.exists():
+        return False
+
+    expected_previous = _GENESIS_HASH
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+        for line in lines:
+            if not line.strip():
+                continue
+            entry = json.loads(line)
+            if not isinstance(entry, dict):
+                return False
+            if _REQUIRED_FIELDS - set(entry):
+                return False
+            if not str(entry.get("reason", "")).strip():
+                return False
+            if entry.get("decision") not in {"allow", "deny"}:
+                return False
+            if entry.get("prev_hash") != expected_previous:
+                return False
+            stored_hash = entry.get("hash")
+            if not isinstance(stored_hash, str) or stored_hash != _hash(entry):
+                return False
+            expected_previous = stored_hash
+    except (OSError, UnicodeError, json.JSONDecodeError, TypeError):
+        return False
+    return True
