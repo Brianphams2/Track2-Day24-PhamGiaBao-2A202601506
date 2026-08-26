@@ -131,6 +131,18 @@ pytest tests/test_ledger.py -v
 
 Sau mỗi bước 3a-3d, commit riêng — 4 commit cho 4 file.
 
+---
+
+<p align="center">
+  <img src="assets/easter-egg-2.png" alt="Thầy Hải Dương nhìn thẳng vào camera, mặt không cảm xúc" width="260">
+</p>
+
+> 🥚 **Easter egg #2** — thầy Hải Dương lúc mở `ledger.jsonl` của bạn ra và
+> thấy dòng thứ 400 vẫn thiếu `reason`. Đừng để thầy phải nhìn như vậy —
+> đó là điều kiện trượt số 1 trong `Rubric.md`.
+
+---
+
 ## Bước 4 — Prove + evidence (20')
 
 ```bash
